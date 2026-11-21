@@ -93,6 +93,14 @@ read_mib() {
   fi
 }
 
+bytes_to_mib() {
+  local v="$1"
+  case "$v" in
+    ''|*[!0-9]*) printf 'unknown\n' ;;
+    *) printf '%s\n' "$((v / 1048576))" ;;
+  esac
+}
+
 ram_values() {
   free -m | awk '/^Mem:/{print $2" "$7}'
 }
@@ -362,10 +370,9 @@ print_status() {
   local mode lim gtt_total gtt_used vram_total ram_total ram_avail
   mode=$(detect_mode)
   lim=$(ttm_limit)
-  gtt_total=$(read_mib "$DRM/mem_info_gtt_total")
-  gtt_used=$(read_mib "$DRM/mem_info_gtt_used")
-  vram_total=$(read_mib "$DRM/mem_info_vram_total")
-  if [ "$vram_total" != unknown ]; then vram_total=$((vram_total / 1048576)); fi
+  gtt_total=$(bytes_to_mib "$(read_mib "$DRM/mem_info_gtt_total")")
+  gtt_used=$(bytes_to_mib "$(read_mib "$DRM/mem_info_gtt_used")")
+  vram_total=$(bytes_to_mib "$(read_mib "$DRM/mem_info_vram_total")")
   read -r ram_total ram_avail < <(ram_values)
   printf 'MODE=%s\n' "$mode"
   printf 'MODE_LABEL=%s\n' "$(mode_label "$mode" "${lim:-none}")"
@@ -390,8 +397,8 @@ print_details() {
   printf '  mode      : %s\n' "$(mode_label "$mode" "${lim:-none}")"
   printf '  ttm limit : %s pages%s\n' "${lim:-none}" "$([ -n "$lim" ] && printf ' (%s MiB)' "$((lim / 256))" || true)"
   printf '  GPU total : %s MiB GTT + %s MiB VRAM carve-out\n' \
-    "$(read_mib "$DRM/mem_info_gtt_total")" "$(read_mib "$DRM/mem_info_vram_total" | awk '{print int($1/1048576)}')"
-  printf '  GPU used  : %s MiB GTT\n' "$(read_mib "$DRM/mem_info_gtt_used")"
+    "$(bytes_to_mib "$(read_mib "$DRM/mem_info_gtt_total")")" "$(bytes_to_mib "$(read_mib "$DRM/mem_info_vram_total")")"
+  printf '  GPU used  : %s MiB GTT\n' "$(bytes_to_mib "$(read_mib "$DRM/mem_info_gtt_used")")"
   printf '  RAM       : %s\n' "$(free -h | awk '/^Mem:/{print $3" used, "$7" available of "$2}')"
   printf '  cold boot : %s\n' "$(tr -d '\r\n' <"$ESP/cmdline.txt" 2>/dev/null || printf 'unreadable')"
   printf '  backup    : %s\n' "$(cat "$STATE/backup-dir" 2>/dev/null || printf 'none')"
@@ -402,7 +409,7 @@ record_boot() {
   local mode lim
   mode=$(detect_mode)
   lim=$(ttm_limit)
-  log "boot: mode=$mode ttm_limit=${lim:-none} gtt_total=$(read_mib "$DRM/mem_info_gtt_total")MiB vram=$(read_mib "$DRM/mem_info_vram_total")B ram_avail=$(ram_values | awk '{print $2}')MiB kernel=$(uname -r)"
+  log "boot: mode=$mode ttm_limit=${lim:-none} gtt_total=$(bytes_to_mib "$(read_mib "$DRM/mem_info_gtt_total")")MiB vram=$(bytes_to_mib "$(read_mib "$DRM/mem_info_vram_total")")MiB ram_avail=$(ram_values | awk '{print $2}')MiB kernel=$(uname -r)"
   if [ "$DRY_RUN" != 1 ]; then
     mkdir -p "$STATE"
     printf '%s\n' "$mode" >"$STATE/last-boot-mode"

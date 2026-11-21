@@ -45,8 +45,8 @@ printf '0x20000000\n' >"$ESP/vram.txt"
 : >"$ESP/initrd.img"
 touch -d '30 days ago' "$ESP/bzImage" "$ESP/initrd.img"
 printf 'root=LABEL=proxmox9 rw rootwait quiet console=ttyTitania0 console=tty0\n' >"$CMDLINE"
-printf '11264\n' >"$DRM/mem_info_gtt_total"
-printf '12\n' >"$DRM/mem_info_gtt_used"
+printf '11811160064\n' >"$DRM/mem_info_gtt_total"
+printf '11767808\n' >"$DRM/mem_info_gtt_used"
 printf '536870912\n' >"$DRM/mem_info_vram_total"
 
 cat >"$BIN/kexec" <<'EOF'
@@ -174,6 +174,8 @@ reset_state
 out=$(run_switch status)
 if printf '%s\n' "$out" | grep -qx 'MODE=default'; then ok "status: default detected"; else bad "status: default detected"; fi
 if printf '%s\n' "$out" | grep -qx 'GTT_TOTAL_MIB=11264'; then ok "status: GTT total read"; else bad "status: GTT total read"; fi
+if printf '%s\n' "$out" | grep -qx 'GTT_USED_MIB=11'; then ok "status: GTT used converted from bytes"; else bad "status: GTT used converted from bytes"; fi
+if printf '%s\n' "$out" | grep -qx 'VRAM_TOTAL_MIB=512'; then ok "status: VRAM converted from bytes"; else bad "status: VRAM converted from bytes"; fi
 if printf '%s\n' "$out" | grep -qx 'VRAM_TOTAL_MIB=512'; then ok "status: VRAM carve-out converted to MiB"; else bad "status: VRAM carve-out converted to MiB"; fi
 
 reset_state
