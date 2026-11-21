@@ -120,11 +120,11 @@ and makes both modes unsafe.
 prefixes pasted text with a bracketed-paste marker. Type
 `bind 'set enable-bracketed-paste off'` and press Enter, then paste again.
 
-**Console is black on Debian 13** — known Proxmox/Debian 13 behaviour when the
-container has no `nesting=1` feature, so systemd's console getty cannot start.
-The installer sets it; re-run the one-liner to repair an existing container
-(it finds the CT by its `ps5-mode` hostname). It also enables root autologin on
-tty1 so the console opens straight into the menu.
+**Console is black on Debian 13** — the console getty cannot start without the
+`nesting=1` feature. The installer sets `nesting=1` **and** the container's
+console mode to `shell`, so the Console tab opens a root shell directly (no
+getty, no login) and the menu starts. Re-run the one-liner to repair an
+existing container; it finds the CT by its `ps5-mode` hostname.
 
 **Menu says the host is unreachable** — the container's IP changed (DHCP) and
 the key is pinned to the old one. Re-pin:

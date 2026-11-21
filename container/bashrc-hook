@@ -2,9 +2,10 @@
 # Sourced from /root/.bashrc and /etc/profile.d/ps5-menu.sh.
 # Skipped for non-interactive shells (scp, pct exec, scripts) and once the
 # menu has already run in this session, so "Exit to bash" really gives bash.
-if [ -z "${PS5_MENU_DONE:-}" ] && [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+if [ -z "${PS5_MENU_DONE:-}" ] && [ -t 0 ] && [ -t 1 ]; then
   export PS5_MENU_DONE=1
-  if [ -x /usr/local/bin/ps5-menu ]; then
+  [ -n "${TERM:-}" ] || export TERM=xterm-256color
+  if [ "${TERM:-dumb}" != "dumb" ] && [ -x /usr/local/bin/ps5-menu ]; then
     /usr/local/bin/ps5-menu
   fi
 fi

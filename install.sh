@@ -286,14 +286,14 @@ setup_container() {
       --cores "$CT_CORES" --memory "$CT_MEMORY" --swap "$CT_SWAP" \
       --rootfs "$ROOTFS_STORAGE:$CT_DISK" \
       --net0 "$net" \
-      --unprivileged 1 --features nesting=1 --onboot 1 --ostype debian --start 1
+      --unprivileged 1 --features nesting=1 --cmode shell --onboot 1 --ostype debian --start 1
     ok "container $CTID created and started"
   fi
   if [ "$exists" = 1 ] && [ "$DRY_RUN" = 1 ]; then
-    printf '    would enable nesting and restart CT %s so the web console works\n' "$CTID"
+    printf '    would set console mode shell + nesting and restart CT %s so the web console works\n' "$CTID"
   elif [ "$exists" = 1 ]; then
-    pct set "$CTID" --features nesting=1 >/dev/null 2>&1 \
-      || warn "could not set nesting=1 on CT $CTID; the web console may stay black"
+    pct set "$CTID" --cmode shell --features nesting=1 >/dev/null 2>&1 \
+      || warn "could not set console mode shell on CT $CTID; the web console may stay black"
     pct reboot "$CTID" >/dev/null 2>&1 || pct start "$CTID" >/dev/null 2>&1 || true
   fi
 

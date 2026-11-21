@@ -332,6 +332,7 @@ inst_out=$(env \
   bash "$ROOT/install.sh" 2>&1)
 if printf '%s\n' "$inst_out" | grep -q 'pct create 103'; then ok "installer: container create planned"; else bad "installer: container create planned"; fi
 if printf '%s\n' "$inst_out" | grep -q 'nesting=1'; then ok "installer: console nesting enabled at create"; else bad "installer: console nesting enabled at create"; fi
+if printf '%s\n' "$inst_out" | grep -q 'cmode shell'; then ok "installer: console mode shell at create"; else bad "installer: console mode shell at create"; fi
 if printf '%s\n' "$inst_out" | grep -q 'console autologin'; then ok "installer: console autologin planned"; else bad "installer: console autologin planned"; fi
 if printf '%s\n' "$inst_out" | grep -q 'Install complete'; then ok "installer: completion message"; else bad "installer: completion message"; fi
 if printf '%s\n' "$inst_out" | grep -q 'ERROR'; then bad "installer: no errors"; printf '%s\n' "$inst_out" | grep 'ERROR'; else ok "installer: no errors"; fi
@@ -343,7 +344,7 @@ inst2=$(env \
   PCT_EXISTS=1 PATH="$BIN:$PATH" \
   bash "$ROOT/install.sh" 2>&1)
 if printf '%s\n' "$inst2" | grep -q 'CT 103 already exists'; then ok "installer: existing ps5-mode CT found by name"; else bad "installer: existing ps5-mode CT found by name"; fi
-if printf '%s\n' "$inst2" | grep -q 'would enable nesting'; then ok "installer: existing CT nesting planned"; else bad "installer: existing CT nesting planned"; fi
+if printf '%s\n' "$inst2" | grep -q 'console mode shell'; then ok "installer: existing CT console mode planned"; else bad "installer: existing CT console mode planned"; fi
 if printf '%s\n' "$inst2" | grep -q 'pct create'; then bad "installer: existing CT not recreated"; else ok "installer: existing CT not recreated"; fi
 
 echo
