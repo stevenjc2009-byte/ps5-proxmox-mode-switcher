@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ps5-mode-ctl - forced command for the ps5-mode container's SSH key.
+#
+# The container's key is pinned to this script in root's authorized_keys with
+# restrict,no-pty,from="<container IP>", so the key can do exactly these five
+# read/switch operations and nothing else. No shell, no file access, no port
+# forwarding, no pty.
+set -euo pipefail
+
+CMD="${SSH_ORIGINAL_COMMAND:-}"
+CMD="${CMD#"${CMD%%[![:space:]]*}"}"
+CMD="${CMD%"${CMD##*[![:space:]]}"}"
+SWITCH_BIN="${PS5MODE_SWITCH_BIN:-/usr/local/sbin/ps5-mode-switch}"
+
+case "$CMD" in
+  status|details|ai|default|rollback)
+    exec "$SWITCH_BIN" "$CMD"
+    ;;
+  "")
+    echo "refused: a command is required (status|details|ai|default|rollback)" >&2
+    exit 64
+    ;;
+  *)
+    echo "refused: unknown command '$CMD' (allowed: status|details|ai|default|rollback)" >&2
+    exit 64
+    ;;
+esac

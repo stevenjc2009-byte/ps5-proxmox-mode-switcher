@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# ps5-menu - interactive RAM/VRAM mode menu for the ps5-mode container.
+#
+# Launched automatically when the container's Shell is opened in the Proxmox
+# web UI. It talks to the host only through a restricted SSH key whose forced
+# command allows status|details|ai|default|rollback.
+set -uo pipefail
+
+STATE_DIR="${PS5MODE_CT_STATE:-/etc/ps5-mode}"
+KEY="$STATE_DIR/id_ed25519"
+KNOWN="$STATE_DIR/known_hosts"
+ERR_FILE="${TMPDIR:-/tmp}/ps5-menu.err"
+HOST=$(cat "$STATE_DIR/host" 2>/dev/null || true)
+SSH_OPTS=(
+  -i "$KEY"
+  -o BatchMode=yes
+  -o IdentitiesOnly=yes
+  -o ConnectTimeout=8
+  -o StrictHostKeyChecking=accept-new
+  -o UserKnownHostsFile="$KNOWN"
+)
+
+ssh_host() { ssh "${SSH_OPTS[@]}" "root@$HOST" "$@"; }
+
+have_whiptail() {
+  command -v whiptail >/dev/null 2>&1 || return 1
+  [ -t 0 ] && [ -t 1 ] || return 1
+  [ -n "${TERM:-}" ] && [ "${TERM:-dumb}" != dumb ] || return 1
+  return 0
+}
+
+val() {
+  printf '%s\n' "$STATUS" | sed -n "s/^$1=//p" | head -n1
+}
+
+fetch_status() {
+  STATUS=$(ssh_host status 2>"$ERR_FILE")
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    STATUS=""
+    LAST_ERR=$(cat "$ERR_FILE" 2>/dev/null || true)
+    [ -n "$LAST_ERR" ] || LAST_ERR="ssh exited with status $rc"
+    return 1
+  fi
+  return 0
+}
+
+status_text() {
+  local mode label gtt_total gtt_used vram ram_total ram_avail kernel host up
+  mode=$(val MODE); label=$(val MODE_LABEL)
+  gtt_total=$(val GTT_TOTAL_MIB); gtt_used=$(val GTT_USED_MIB)
+  vram=$(val VRAM_TOTAL_MIB)
+  ram_total=$(val RAM_TOTAL_MIB); ram_avail=$(val RAM_AVAIL_MIB)
+  kernel=$(val KERNEL); host=$(val HOSTNAME); up=$(val UPTIME)
+  printf 'Current mode: %s\n' "${label:-$mode}"
+  printf 'GPU limit   : %s MiB GTT + %s MiB VRAM (used %s MiB)\n' "$gtt_total" "$vram" "$gtt_used"
+  printf 'System RAM  : %s MiB available of %s\n' "$ram_avail" "$ram_total"
+  printf 'Host        : %s, kernel %s, up %s\n' "$host" "$kernel" "$up"
+}
+
+msg() {
+  local title="$1" text="$2"
+  if have_whiptail; then
+    whiptail --title "$title" --msgbox "$text" 20 78
+  else
+    printf '\n=== %s ===\n%s\n\nPress Enter to continue.' "$title" "$text"
+    read -r _
+  fi
+}
+
+ask_yes() {
+  local title="$1" text="$2"
+  if have_whiptail; then
+    whiptail --title "$title" --yesno "$text" 20 78
+    return $?
+  fi
+  printf '\n=== %s ===\n%s\n\nProceed? [y/N] ' "$title" "$text"
+  local a
+  read -r a
+  case "$a" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+pick() {
+  local text="$1"
+  if have_whiptail; then
+    CHOICE=$(whiptail --title "PS5 Proxmox Mode Switcher" --menu "$text" 24 78 6 \
+      "1" "Switch to DEFAULT mode  (Minecraft / VMs / general use)" \
+      "2" "Switch to AI mode       (11 GB VRAM / ~3 GB system RAM)" \
+      "3" "Details / refresh" \
+      "4" "Exit to normal bash shell (type ps5-menu to return)" \
+      3>&1 1>&2 2>&3) || exit 0
+    return 0
+  fi
+  printf '\n=== PS5 Proxmox Mode Switcher ===\n%s\n\n' "$text"
+  printf '  1) Switch to DEFAULT mode  (Minecraft / VMs / general use)\n'
+  printf '  2) Switch to AI mode       (11 GB VRAM / ~3 GB system RAM)\n'
+  printf '  3) Details / refresh\n'
+  printf '  4) Exit to normal bash shell (type ps5-menu to return)\n\n'
+  printf 'Choose [1-4]: '
+  read -r CHOICE
+  [ -n "$CHOICE" ] || exit 0
+}
+
+unreachable() {
+  local text="Cannot reach the Proxmox host over the restricted SSH bridge.
+
+$LAST_ERR
+
+Check that the host is up and that the container still has the same IP
+address (the host pins it in authorized_keys). Re-run the installer with
+--repin after a DHCP change."
+  if have_whiptail; then
+    whiptail --title "Host unreachable" --menu "$text" 24 78 4 \
+      "1" "Retry" \
+      "2" "Exit to bash" \
+      3>&1 1>&2 2>&3 || exit 0
+    [ "$CHOICE" = 1 ] || exit 0
+  else
+    printf '\n%s\n\n1) Retry\n2) Exit to bash\nChoose [1-2]: ' "$text"
+    read -r a
+    [ "$a" = 1 ] || exit 0
+  fi
+}
+
+switch_mode() {
+  local target="$1" label="$2" text out rc
+  text="Switch to $label?
+
+Every VM and container on the host stops cleanly, this shell closes,
+and the node is back in about 2 minutes. The PS5 itself stays powered on.
+
+The mode is a GPU memory ceiling, not a reservation: AI mode lets the GPU
+use up to 11 GiB of the same RAM, so a loaded model leaves ~3 GiB for
+Proxmox. DEFAULT mode restores the stock ceiling."
+  ask_yes "Confirm switch" "$text" || return 0
+  out=$(ssh_host "$target" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    msg "Switch failed" "$out"
+    return 0
+  fi
+  printf '\n%s\n' "$out"
+  printf '\nThis container will stop in a few seconds. Reopen the container Shell in about 2 minutes; it will show the new mode.\n'
+  sleep 3
+  exit 0
+}
+
+if [ "${1:-}" = "--status" ]; then
+  fetch_status || { printf '%s\n' "$LAST_ERR" >&2; exit 1; }
+  printf '%s\n' "$STATUS"
+  exit 0
+fi
+
+if [ -z "$HOST" ] || [ ! -r "$KEY" ]; then
+  printf 'ps5-menu: missing %s/host or %s/id_ed25519; re-run the installer.\n' "$STATE_DIR" "$STATE_DIR" >&2
+  exit 1
+fi
+
+while :; do
+  if ! fetch_status; then
+    unreachable
+    continue
+  fi
+  pick "$(status_text)"
+  case "$CHOICE" in
+    1) switch_mode default "DEFAULT mode (full RAM, stock GPU limit)" ;;
+    2) switch_mode ai "AI mode (11 GB VRAM / ~3 GB system RAM)" ;;
+    3)
+      out=$(ssh_host details 2>&1)
+      msg "Details" "${out:-no output}"
+      ;;
+    4) exit 0 ;;
+    *) : ;;
+  esac
+done

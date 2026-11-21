@@ -1,0 +1,12 @@
+[Unit]
+Description=Record the PS5 RAM/VRAM mode after boot
+After=local-fs.target
+ConditionPathExists=/usr/local/sbin/ps5-mode-switch
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ps5-mode-switch record-boot
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

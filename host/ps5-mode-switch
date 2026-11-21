@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# ps5-mode-switch - switch the PS5 Proxmox node between its default RAM/VRAM
+# split and the 11 GiB GPU (GTT) split, without rebooting the PS5 itself.
+#
+# The GPU memory ceiling is the TTM GTT limit, set by the kernel command line.
+# amdgpu fixes that limit when the driver starts, so the only way to change it
+# live is a kexec of the same kernel with a different command line.  kexec does
+# a clean systemd shutdown first: every VM and container stops, the PS5 itself
+# stays powered on, and onboot guests come back with the new split.
+#
+# Usage: ps5-mode-switch status|details|ai|default|rollback|record-boot
+#
+# Test hooks (read-only path overrides, plus a dry-run):
+#   PS5MODE_CMDLINE_FILE, PS5MODE_ESP, PS5MODE_DRM, PS5MODE_STATE,
+#   PS5MODE_LOG, PS5MODE_LOCK, PS5MODE_BACKUP_ROOT, PS5MODE_DRY_RUN=1,
+#   PS5MODE_ALLOW_NONROOT=1, PS5MODE_ALLOW_PENDING=1
+set -Eeuo pipefail
+umask 022
+
+PROG=ps5-mode-switch
+AI_PAGES=2883584                 # 2883584 x 4 KiB = 11264 MiB = 11 GiB
+DEFAULT_VRAM_BYTES=536870912     # 0x20000000 = 512 MiB carve-out
+MENU_CT_NAME="${PS5MODE_MENU_CT_NAME:-ps5-mode}"
+
+ESP="${PS5MODE_ESP:-/boot/efi}"
+CMDLINE_FILE="${PS5MODE_CMDLINE_FILE:-/proc/cmdline}"
+DRM="${PS5MODE_DRM:-/sys/class/drm/card0/device}"
+STATE="${PS5MODE_STATE:-/var/lib/ps5-mode}"
+LOG="${PS5MODE_LOG:-/var/log/ps5-mode.log}"
+LOCK="${PS5MODE_LOCK:-/run/ps5-mode.lock}"
+BACKUP_ROOT="${PS5MODE_BACKUP_ROOT:-/root}"
+DRY_RUN="${PS5MODE_DRY_RUN:-0}"
+ALLOW_PENDING="${PS5MODE_ALLOW_PENDING:-0}"
+
+on_err() { printf '%s: failed at line %s: %s\n' "$PROG" "${1:-?}" "${2:-?}" >&2; }
+trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
+
+log() {
+  local msg="$*"
+  printf '%s\n' "$msg" >&2
+  if [ "$DRY_RUN" != 1 ]; then
+    mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+    printf '%s %s\n' "$(date -Is)" "$msg" >>"$LOG" 2>/dev/null || true
+  fi
+}
+
+die() { log "ERROR: $*"; exit 1; }
+
+require_root() {
+  if [ "${PS5MODE_ALLOW_NONROOT:-0}" = 1 ]; then return 0; fi
+  [ "$(id -u)" -eq 0 ] || die "must run as root"
+}
+
+require_file() { [ -f "$1" ] || die "missing required file: $1"; }
+
+read_cmdline() {
+  require_file "$CMDLINE_FILE"
+  tr -d '\r\n' <"$CMDLINE_FILE"
+}
+
+ttm_limit() {
+  read_cmdline | tr ' ' '\n' | sed -n 's/^ttm\.pages_limit=//p' | head -n1
+}
+
+detect_mode() {
+  local lim
+  lim=$(ttm_limit)
+  if [ -z "$lim" ]; then
+    printf 'default\n'
+  elif [ "$lim" = "$AI_PAGES" ]; then
+    printf 'ai\n'
+  else
+    printf 'custom\n'
+  fi
+}
+
+mode_label() {
+  case "$1" in
+    ai) printf 'AI - 11 GiB GPU / ~3 GiB system RAM\n' ;;
+    default) printf 'DEFAULT - full RAM, stock GPU limit\n' ;;
+    *) printf 'CUSTOM - ttm.pages_limit=%s\n' "${2:-unknown}" ;;
+  esac
+}
+
+read_mib() {
+  local f="$1"
+  if [ -r "$f" ]; then
+    local v
+    v=$(tr -dc '0-9' <"$f" 2>/dev/null || true)
+    [ -n "$v" ] && printf '%s\n' "$v" || printf 'unknown\n'
+  else
+    printf 'unknown\n'
+  fi
+}
+
+ram_values() {
+  free -m | awk '/^Mem:/{print $2" "$7}'
+}
+
+uptime_human() {
+  local up d h m
+  up=$(cut -d' ' -f1 /proc/uptime)
+  up=${up%%.*}
+  d=$((up / 86400)); h=$(((up % 86400) / 3600)); m=$(((up % 3600) / 60))
+  if [ "$d" -gt 0 ]; then printf '%sd %sh\n' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%sh %sm\n' "$h" "$m"
+  else printf '%sm\n' "$m"; fi
+}
+
+build_cmdline() {
+  local target="$1" line
+  line=$(awk '{
+      n = 0
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^ttm\./) continue
+        if ($i ~ /^BOOT_IMAGE=/) continue
+        printf "%s%s", (n++ ? " " : ""), $i
+      }
+      print ""
+    }' "$CMDLINE_FILE")
+  if [ "$target" = ai ]; then
+    line="${line:+$line }ttm.pages_limit=$AI_PAGES ttm.page_pool_size=$AI_PAGES"
+  fi
+  printf '%s\n' "$line"
+}
+
+check_vram_carveout() {
+  local f="$ESP/vram.txt" raw val
+  [ -f "$f" ] || return 0
+  raw=$(tr -d '[:space:]' <"$f")
+  [ -n "$raw" ] || raw=0x20000000
+  case "$raw" in
+    0x*|0X*) val=$((raw)) ;;
+    *[!0-9]*) die "cannot parse $f ('$raw'); expected a hex byte count such as 0x20000000" ;;
+    *) val=$((10#$raw)) ;;
+  esac
+  if [ "$val" -eq 0 ]; then
+    val=$DEFAULT_VRAM_BYTES
+  fi
+  if [ "$val" -ne "$DEFAULT_VRAM_BYTES" ]; then
+    die "$f sets a $(numfmt --to=iec-i --suffix=B "$val" 2>/dev/null || printf '%s bytes' "$val") VRAM carve-out, not the 512 MiB default. Both modes assume the 512 MiB carve-out; a larger one takes RAM away at cold PS5 boot. Restore 0x20000000 and cold-boot the PS5 before switching."
+  fi
+}
+
+check_kexec_tools() {
+  command -v kexec >/dev/null 2>&1 || die "kexec is not installed (apt-get install -y kexec-tools)"
+  command -v systemd-run >/dev/null 2>&1 || die "systemd-run is missing; this host is not running systemd"
+}
+
+check_kernel_pending() {
+  local now bt boot bzm
+  require_file "$ESP/bzImage"
+  require_file "$ESP/initrd.img"
+  now=$(date +%s)
+  bt=$(cut -d' ' -f1 /proc/uptime); bt=${bt%%.*}
+  boot=$((now - bt))
+  bzm=$(stat -c %Y "$ESP/bzImage")
+  if [ "$bzm" -gt "$boot" ] && [ "$ALLOW_PENDING" != 1 ]; then
+    die "$ESP/bzImage is newer than the running kernel (a kernel update is pending). Reboot the PS5 through the loader first, or set PS5MODE_ALLOW_PENDING=1 if you know the modules match."
+  fi
+}
+
+ensure_backup() {
+  local dir
+  if [ -f "$STATE/backup-dir" ] && [ -d "$(cat "$STATE/backup-dir")" ]; then return 0; fi
+  dir="$BACKUP_ROOT/ps5-mode-backup-$(date +%Y%m%d-%H%M%S)"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "would create backup in $dir"
+    return 0
+  fi
+  mkdir -p "$dir" || die "cannot create $dir"
+  local f
+  for f in cmdline.txt vram.txt cmdline.txt.11gib-gtt cmdline.txt.12gib-gtt; do
+    [ -f "$ESP/$f" ] && cp -a "$ESP/$f" "$dir/$f"
+  done
+  cp /proc/cmdline "$dir/proc-cmdline.txt" 2>/dev/null || true
+  uname -a >"$dir/uname.txt" 2>/dev/null || true
+  { command -v pveversion >/dev/null 2>&1 && pveversion -v; } >"$dir/pveversion.txt" 2>/dev/null || true
+  { qm list 2>/dev/null; pct list 2>/dev/null; } >"$dir/guests.txt" 2>/dev/null || true
+  cat >"$dir/README.txt" <<'EOF'
+Original PS5 Proxmox boot configuration, saved by the ps5-mode-switcher
+installer / switcher before its first change.
+
+  cmdline.txt      cold-boot kernel command line (stock default, no ttm args)
+  vram.txt         PS5 loader VRAM carve-out (0x20000000 = 512 MiB)
+  proc-cmdline.txt the command line the running kernel was started with
+
+Restore everything (the switcher does this for you):
+  ps5-mode-switch rollback
+
+Manual restore: copy cmdline.txt and vram.txt back to /boot/efi, then either
+kexec with cmdline.txt or cold-boot the PS5.
+EOF
+  mkdir -p "$STATE"
+  printf '%s\n' "$dir" >"$STATE/backup-dir"
+  log "backup written to $dir"
+}
+
+write_mode_file() {
+  local target="$1" content="$2" tmp
+  if [ "$DRY_RUN" = 1 ]; then
+    log "would write $ESP/cmdline.txt.$target"
+    return 0
+  fi
+  tmp="$ESP/.cmdline.txt.$target.tmp.$$"
+  printf '%s\n' "$content" >"$tmp" || die "cannot write $tmp"
+  mv -f "$tmp" "$ESP/cmdline.txt.$target" || die "cannot replace $ESP/cmdline.txt.$target"
+  chmod 0644 "$ESP/cmdline.txt.$target" 2>/dev/null || true
+  log "wrote $ESP/cmdline.txt.$target"
+}
+
+menu_ctid() {
+  command -v pct >/dev/null 2>&1 || return 0
+  pct list 2>/dev/null | awk -v n="$MENU_CT_NAME" 'NR > 1 && $NF == n {print $1; exit}'
+}
+
+list_running_guests() {
+  command -v qm >/dev/null 2>&1 && qm list 2>/dev/null | awk 'NR > 1 && $3 == "running" {print "vm " $1}'
+  command -v pct >/dev/null 2>&1 && pct list 2>/dev/null | awk 'NR > 1 && $2 == "running" {print "ct " $1}'
+  return 0
+}
+
+STOPPED_COUNT=0
+stop_guests() {
+  local self kind id failed=()
+  self=$(menu_ctid)
+  STOPPED_COUNT=0
+  while read -r kind id; do
+    [ -n "${kind:-}" ] || continue
+    if [ "$kind" = ct ] && [ -n "$self" ] && [ "$id" = "$self" ]; then
+      log "leaving menu container CT $id to the kexec shutdown"
+      continue
+    fi
+    log "shutting down $kind $id"
+    if [ "$DRY_RUN" = 1 ]; then
+      STOPPED_COUNT=$((STOPPED_COUNT + 1))
+      continue
+    fi
+    if [ "$kind" = vm ]; then
+      qm shutdown "$id" --timeout 180 --forceStop 0 >/dev/null 2>&1 || failed+=("vm $id")
+    else
+      pct shutdown "$id" --timeout 120 --forceStop 0 >/dev/null 2>&1 || failed+=("ct $id")
+    fi
+    STOPPED_COUNT=$((STOPPED_COUNT + 1))
+  done < <(list_running_guests)
+  if [ "${#failed[@]}" -gt 0 ]; then
+    die "these guests did not shut down cleanly: ${failed[*]}. Nothing was switched. Start them again and retry, or shut them down by hand."
+  fi
+}
+
+load_kexec() {
+  local line="$1"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "would run: kexec -u; kexec -l $ESP/bzImage --initrd=$ESP/initrd.img --command-line=\"$line\""
+    return 0
+  fi
+  kexec -u >/dev/null 2>&1 || true
+  kexec -l "$ESP/bzImage" --initrd="$ESP/initrd.img" --command-line="$line" \
+    || die "kexec could not load the kernel; nothing was changed"
+  log "kexec image loaded"
+}
+
+schedule_kexec() {
+  local unit
+  unit="ps5-mode-kexec-$(date +%s)"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "would run: systemd-run --on-active=5 --unit=$unit systemctl kexec"
+    return 0
+  fi
+  systemd-run --on-active=5 --unit="$unit" --collect \
+    --description="PS5 RAM/VRAM mode switch" systemctl kexec >/dev/null 2>&1 \
+    || die "could not schedule the kexec. Guests are stopped; start them again and retry."
+  log "kexec scheduled as $unit (5 s)"
+}
+
+onboot_warnings() {
+  local target="$1" kind id mem name
+  [ "$target" = ai ] || return 0
+  if command -v pct >/dev/null 2>&1; then
+    pct list 2>/dev/null | awk 'NR > 1 {print $1}' | while read -r id; do
+      [ -n "$id" ] || continue
+      name=$(pct config "$id" 2>/dev/null | sed -n 's/^hostname: //p')
+      [ "$name" = "$MENU_CT_NAME" ] && continue
+      pct config "$id" 2>/dev/null | grep -q '^onboot: 1$' || continue
+      mem=$(pct config "$id" 2>/dev/null | sed -n 's/^memory: //p')
+      case "$mem" in ''|*[!0-9]*) continue ;; esac
+      [ "$mem" -gt 3072 ] || continue
+      printf 'WARNING: onboot ct %s (%s, %s MB) is larger than the ~3 GiB left in AI mode; it will start but may fail or be OOM-killed while a model is loaded.\n' \
+        "$id" "${name:-?}" "$mem"
+    done
+  fi
+  if command -v qm >/dev/null 2>&1; then
+    qm list 2>/dev/null | awk 'NR > 1 {print $1}' | while read -r id; do
+      [ -n "$id" ] || continue
+      name=$(qm config "$id" 2>/dev/null | sed -n 's/^name: //p')
+      qm config "$id" 2>/dev/null | grep -q '^onboot: 1$' || continue
+      mem=$(qm config "$id" 2>/dev/null | sed -n 's/^memory: //p')
+      case "$mem" in ''|*[!0-9]*) continue ;; esac
+      [ "$mem" -gt 3072 ] || continue
+      printf 'WARNING: onboot vm %s (%s, %s MB) is larger than the ~3 GiB left in AI mode; it will start but may fail or be OOM-killed while a model is loaded.\n' \
+        "$id" "${name:-?}" "$mem"
+    done
+  fi
+}
+
+do_switch() {
+  local target="$1" cur line
+  require_root
+  check_kexec_tools
+  check_vram_carveout
+  check_kernel_pending
+  cur=$(detect_mode)
+  if [ "$cur" = "$target" ]; then
+    printf 'Already in %s mode; nothing to do.\n' "$target"
+    log "switch $target skipped: already $target"
+    return 0
+  fi
+  line=$(build_cmdline "$target")
+  log "switch $target requested (from $cur)"
+  ensure_backup
+  write_mode_file "$target" "$line"
+  load_kexec "$line"
+  stop_guests
+  schedule_kexec
+  printf 'Switching to %s mode.\n' "$target"
+  printf '%s\n' "Command line: $line"
+  printf 'Guests stopped: %s. The kexec starts in 5 s; SSH and this shell drop, and the node is back in about 2 minutes.\n' "$STOPPED_COUNT"
+  if [ "$target" = ai ]; then
+    printf 'AI mode leaves roughly 3 GiB of system RAM when the GPU is full. Do not expect CT 101 (ollama) or VM 100 to run a large model at the same time.\n'
+    onboot_warnings "$target"
+  fi
+}
+
+do_rollback() {
+  local dir line
+  require_root
+  check_kexec_tools
+  dir=$(cat "$STATE/backup-dir" 2>/dev/null || true)
+  [ -n "$dir" ] && [ -d "$dir" ] || die "no backup directory recorded in $STATE/backup-dir"
+  require_file "$dir/cmdline.txt"
+  log "rollback from $dir"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "would restore $dir/cmdline.txt and $dir/vram.txt to $ESP"
+  else
+    if ! cmp -s "$dir/cmdline.txt" "$ESP/cmdline.txt"; then
+      cp -a "$dir/cmdline.txt" "$ESP/cmdline.txt" || die "could not restore $ESP/cmdline.txt"
+    fi
+    if [ -f "$dir/vram.txt" ] && ! cmp -s "$dir/vram.txt" "$ESP/vram.txt"; then
+      cp -a "$dir/vram.txt" "$ESP/vram.txt"
+    fi
+    log "original cmdline.txt and vram.txt restored"
+  fi
+  line=$(tr -d '\r\n' <"$dir/cmdline.txt")
+  [ -n "$line" ] || die "backup cmdline.txt is empty"
+  load_kexec "$line"
+  stop_guests
+  schedule_kexec
+  printf 'Rolled back to the original boot configuration. Guests stopped: %s; back in about 2 minutes.\n' "$STOPPED_COUNT"
+}
+
+print_status() {
+  local mode lim gtt_total gtt_used vram_total ram_total ram_avail
+  mode=$(detect_mode)
+  lim=$(ttm_limit)
+  gtt_total=$(read_mib "$DRM/mem_info_gtt_total")
+  gtt_used=$(read_mib "$DRM/mem_info_gtt_used")
+  vram_total=$(read_mib "$DRM/mem_info_vram_total")
+  if [ "$vram_total" != unknown ]; then vram_total=$((vram_total / 1048576)); fi
+  read -r ram_total ram_avail < <(ram_values)
+  printf 'MODE=%s\n' "$mode"
+  printf 'MODE_LABEL=%s\n' "$(mode_label "$mode" "${lim:-none}")"
+  printf 'TTM_LIMIT=%s\n' "${lim:-none}"
+  printf 'GTT_TOTAL_MIB=%s\n' "$gtt_total"
+  printf 'GTT_USED_MIB=%s\n' "$gtt_used"
+  printf 'VRAM_TOTAL_MIB=%s\n' "$vram_total"
+  printf 'RAM_TOTAL_MIB=%s\n' "${ram_total:-unknown}"
+  printf 'RAM_AVAIL_MIB=%s\n' "${ram_avail:-unknown}"
+  printf 'KERNEL=%s\n' "$(uname -r)"
+  printf 'HOSTNAME=%s\n' "$(hostname)"
+  printf 'UPTIME=%s\n' "$(uptime_human)"
+}
+
+print_details() {
+  local mode lim
+  mode=$(detect_mode)
+  lim=$(ttm_limit)
+  printf 'PS5 Proxmox RAM/VRAM mode\n'
+  printf '  host      : %s (%s)\n' "$(hostname)" "$(uname -r)"
+  printf '  uptime    : %s\n' "$(uptime_human)"
+  printf '  mode      : %s\n' "$(mode_label "$mode" "${lim:-none}")"
+  printf '  ttm limit : %s pages%s\n' "${lim:-none}" "$([ -n "$lim" ] && printf ' (%s MiB)' "$((lim / 256))" || true)"
+  printf '  GPU total : %s MiB GTT + %s MiB VRAM carve-out\n' \
+    "$(read_mib "$DRM/mem_info_gtt_total")" "$(read_mib "$DRM/mem_info_vram_total" | awk '{print int($1/1048576)}')"
+  printf '  GPU used  : %s MiB GTT\n' "$(read_mib "$DRM/mem_info_gtt_used")"
+  printf '  RAM       : %s\n' "$(free -h | awk '/^Mem:/{print $3" used, "$7" available of "$2}')"
+  printf '  cold boot : %s\n' "$(tr -d '\r\n' <"$ESP/cmdline.txt" 2>/dev/null || printf 'unreadable')"
+  printf '  backup    : %s\n' "$(cat "$STATE/backup-dir" 2>/dev/null || printf 'none')"
+  printf '  log       : %s\n' "$LOG"
+}
+
+record_boot() {
+  local mode lim
+  mode=$(detect_mode)
+  lim=$(ttm_limit)
+  log "boot: mode=$mode ttm_limit=${lim:-none} gtt_total=$(read_mib "$DRM/mem_info_gtt_total")MiB vram=$(read_mib "$DRM/mem_info_vram_total")B ram_avail=$(ram_values | awk '{print $2}')MiB kernel=$(uname -r)"
+  if [ "$DRY_RUN" != 1 ]; then
+    mkdir -p "$STATE"
+    printf '%s\n' "$mode" >"$STATE/last-boot-mode"
+    printf '%s\n' "$(date -Is)" >"$STATE/last-boot-at"
+  fi
+}
+
+with_lock() {
+  local fn="$1"
+  shift
+  if [ "$DRY_RUN" = 1 ] || ! command -v flock >/dev/null 2>&1; then
+    "$fn" "$@"
+    return
+  fi
+  mkdir -p "$(dirname "$LOCK")" 2>/dev/null || true
+  exec 9>"$LOCK" || die "cannot open lock $LOCK"
+  flock -n 9 || die "another switch is already running"
+  "$fn" "$@"
+}
+
+cmd=${1:-status}
+case "$cmd" in
+  status) print_status ;;
+  details) print_details ;;
+  ai) with_lock do_switch ai ;;
+  default) with_lock do_switch default ;;
+  rollback) with_lock do_rollback ;;
+  record-boot) record_boot ;;
+  -h|--help|help)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    printf 'usage: %s status|details|ai|default|rollback|record-boot\n' "$PROG" >&2
+    exit 64
+    ;;
+esac
