@@ -5,7 +5,7 @@ a menu that switches your PS5 Proxmox node between:
 
 | Mode | GPU memory ceiling | What it is for |
 |---|---|---|
-| **DEFAULT** | stock (no `ttm` kernel args) | Minecraft servers, VMs, general Proxmox work |
+| **NORMAL** (default) | stock (no `ttm` kernel args) | Minecraft servers, VMs, general Proxmox work |
 | **AI** | `ttm.pages_limit=2883584 ttm.page_pool_size=2883584` = **11264 MiB (11 GiB) GTT** + the 512 MiB VRAM carve-out | running large local models on the PS5 GPU |
 
 The switch uses **kexec** of the same kernel with a different command line. The
@@ -56,12 +56,12 @@ Set environment variables before the one-liner:
 
 ## Use
 
-Web UI > node > **CT `ps5-mode`** (the installer prints its ID) > **Shell**.
+Web UI > node > **CT `ps5-mode`** (the installer prints its ID) > **Console** (or **Shell**).
 
 The menu starts automatically and shows the live mode, GPU ceiling, RAM and
 host. Choose:
 
-1. **DEFAULT mode** — Minecraft / VMs / general use.
+1. **NORMAL mode (default)** — full RAM, Minecraft / VMs.
 2. **AI mode** — 11 GB VRAM / ~3 GB system RAM.
 3. **Details / refresh.**
 4. **Exit to normal bash shell** (type `ps5-menu` to come back).
@@ -120,6 +120,12 @@ and makes both modes unsafe.
 prefixes pasted text with a bracketed-paste marker. Type
 `bind 'set enable-bracketed-paste off'` and press Enter, then paste again.
 
+**Console is black on Debian 13** — known Proxmox/Debian 13 behaviour when the
+container has no `nesting=1` feature, so systemd's console getty cannot start.
+The installer sets it; re-run the one-liner to repair an existing container
+(it finds the CT by its `ps5-mode` hostname). It also enables root autologin on
+tty1 so the console opens straight into the menu.
+
 **Menu says the host is unreachable** — the container's IP changed (DHCP) and
 the key is pinned to the old one. Re-pin:
 
@@ -154,5 +160,6 @@ host/ps5-mode-ctl                 forced-command dispatcher
 host/ps5-mode-verify.service      logs the mode after every boot
 container/ps5-menu                whiptail menu, plain fallback
 container/bashrc-hook             auto-launch snippet
+container/getty-autologin.conf    root autologin on tty1 (web console)
 tests/run-tests.sh                offline logic tests
 ```

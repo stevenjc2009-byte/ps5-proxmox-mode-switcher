@@ -331,9 +331,20 @@ inst_out=$(env \
   PS5SW_CTID=103 PATH="$BIN:$PATH" \
   bash "$ROOT/install.sh" 2>&1)
 if printf '%s\n' "$inst_out" | grep -q 'pct create 103'; then ok "installer: container create planned"; else bad "installer: container create planned"; fi
+if printf '%s\n' "$inst_out" | grep -q 'nesting=1'; then ok "installer: console nesting enabled at create"; else bad "installer: console nesting enabled at create"; fi
+if printf '%s\n' "$inst_out" | grep -q 'console autologin'; then ok "installer: console autologin planned"; else bad "installer: console autologin planned"; fi
 if printf '%s\n' "$inst_out" | grep -q 'Install complete'; then ok "installer: completion message"; else bad "installer: completion message"; fi
 if printf '%s\n' "$inst_out" | grep -q 'ERROR'; then bad "installer: no errors"; printf '%s\n' "$inst_out" | grep 'ERROR'; else ok "installer: no errors"; fi
 if ! grep -q 'pct create' "$CALLS"; then ok "installer dry-run: pct create not executed"; else bad "installer dry-run: pct create not executed"; fi
+
+inst2=$(env \
+  PS5SW_DRY_RUN=1 PS5SW_FORCE=1 PS5SW_ALLOW_NONROOT=1 PS5SW_ESP="$ESP" \
+  PS5SW_STATE_DIR="$T/statehost2" PS5SW_LIB_STATE="$T/libhost2" \
+  PCT_EXISTS=1 PATH="$BIN:$PATH" \
+  bash "$ROOT/install.sh" 2>&1)
+if printf '%s\n' "$inst2" | grep -q 'CT 103 already exists'; then ok "installer: existing ps5-mode CT found by name"; else bad "installer: existing ps5-mode CT found by name"; fi
+if printf '%s\n' "$inst2" | grep -q 'would enable nesting'; then ok "installer: existing CT nesting planned"; else bad "installer: existing CT nesting planned"; fi
+if printf '%s\n' "$inst2" | grep -q 'pct create'; then bad "installer: existing CT not recreated"; else ok "installer: existing CT not recreated"; fi
 
 echo
 printf 'passed: %s   failed: %s\n' "$PASS" "$FAIL"

@@ -119,6 +119,10 @@ resolve_host_ip() {
 }
 
 resolve_ctid() {
+  if [ -z "$CTID" ] && command -v pct >/dev/null 2>&1; then
+    CTID=$(pct list 2>/dev/null |
+      awk -v n="$CT_HOSTNAME" 'NR > 1 && $NF == n {print $1; exit}')
+  fi
   if [ -z "$CTID" ]; then
     CTID=$(pvesh get /cluster/nextid 2>/dev/null || true)
     if ! [[ "$CTID" =~ ^[0-9]+$ ]]; then
@@ -282,15 +286,19 @@ setup_container() {
       --cores "$CT_CORES" --memory "$CT_MEMORY" --swap "$CT_SWAP" \
       --rootfs "$ROOTFS_STORAGE:$CT_DISK" \
       --net0 "$net" \
-      --unprivileged 1 --onboot 1 --ostype debian --start 1
+      --unprivileged 1 --features nesting=1 --onboot 1 --ostype debian --start 1
     ok "container $CTID created and started"
   fi
-  if [ "$exists" = 1 ] && [ "$DRY_RUN" != 1 ]; then
-    pct start "$CTID" >/dev/null 2>&1 || true
+  if [ "$exists" = 1 ] && [ "$DRY_RUN" = 1 ]; then
+    printf '    would enable nesting and restart CT %s so the web console works\n' "$CTID"
+  elif [ "$exists" = 1 ]; then
+    pct set "$CTID" --features nesting=1 >/dev/null 2>&1 \
+      || warn "could not set nesting=1 on CT $CTID; the web console may stay black"
+    pct reboot "$CTID" >/dev/null 2>&1 || pct start "$CTID" >/dev/null 2>&1 || true
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
-    printf '    would install openssh-client + whiptail in CT %s\n' "$CTID"
+    printf '    would install openssh-client + whiptail in CT %s and enable root console autologin\n' "$CTID"
     ip="${CT_IP:-dhcp-pending}"
   else
     log "installing container packages (openssh-client, whiptail)"
@@ -307,6 +315,11 @@ setup_container() {
     pct push "$CTID" --perms 600 "$STATE_DIR/id_ed25519" /etc/ps5-mode/id_ed25519
     pct push "$CTID" --perms 644 "$TMP/bashrc-hook" /etc/ps5-mode/bashrc-hook
     pct push "$CTID" --perms 644 "$TMP/bashrc-hook" /etc/profile.d/ps5-menu.sh
+    pct exec "$CTID" -- install -d -m 0755 /etc/systemd/system/getty@tty1.service.d
+    pct push "$CTID" --perms 644 "$TMP/getty-autologin.conf" \
+      /etc/systemd/system/getty@tty1.service.d/autologin.conf
+    pct exec "$CTID" -- systemctl daemon-reload
+    pct exec "$CTID" -- systemctl restart getty@tty1 >/dev/null 2>&1 || true
     pct exec "$CTID" -- sh -c "printf '%s\n' '$HOST_IP' > /etc/ps5-mode/host"
     pct exec "$CTID" -- sh -c 'touch /etc/ps5-mode/known_hosts; chmod 600 /etc/ps5-mode/known_hosts'
     pct exec "$CTID" -- sh -c "ssh-keyscan -T 5 -t ed25519 '$HOST_IP' > /etc/ps5-mode/known_hosts 2>/dev/null || true"
@@ -394,6 +407,7 @@ main() {
   fetch host/ps5-mode-verify.service "$TMP/ps5-mode-verify.service"
   fetch container/ps5-menu "$TMP/ps5-menu"
   fetch container/bashrc-hook "$TMP/bashrc-hook"
+  fetch container/getty-autologin.conf "$TMP/getty-autologin.conf"
   chmod 0755 "$TMP/ps5-mode-switch" "$TMP/ps5-mode-ctl" "$TMP/ps5-menu"
 
   log "backing up the current boot configuration"
@@ -432,8 +446,8 @@ main() {
 
   printf '\n%s%sInstall complete%s\n\n' "$C_G" "$C_B" "$C_0"
   printf '  Container : CT %s (%s) at %s\n' "$CTID" "$CT_HOSTNAME" "${CT_IP_RESOLVED:-?}"
-  printf '  Open it   : web UI > node > CT %s > Shell (the menu starts itself)\n' "$CTID"
-  printf '  Modes     : DEFAULT (Minecraft / VMs) and AI (11 GB VRAM / ~3 GB RAM)\n'
+  printf '  Open it   : web UI > node > CT %s > Console (the menu starts itself)\n' "$CTID"
+  printf '  Modes     : NORMAL (default: full RAM, Minecraft / VMs) and AI (11 GB VRAM / ~3 GB RAM)\n'
   printf '  Rollback  : ps5-mode-switch rollback   (host shell)\n'
   printf '  Log       : /var/log/ps5-mode.log\n'
   printf '  Backup    : %s\n' "$backup_dir"

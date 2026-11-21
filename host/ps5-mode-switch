@@ -77,7 +77,7 @@ detect_mode() {
 mode_label() {
   case "$1" in
     ai) printf 'AI - 11 GiB GPU / ~3 GiB system RAM\n' ;;
-    default) printf 'DEFAULT - full RAM, stock GPU limit\n' ;;
+    default) printf 'NORMAL - default (full RAM, stock GPU limit)\n' ;;
     *) printf 'CUSTOM - ttm.pages_limit=%s\n' "${2:-unknown}" ;;
   esac
 }

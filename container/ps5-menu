@@ -84,16 +84,16 @@ pick() {
   local text="$1"
   if have_whiptail; then
     CHOICE=$(whiptail --title "PS5 Proxmox Mode Switcher" --menu "$text" 24 78 6 \
-      "1" "Switch to DEFAULT mode  (Minecraft / VMs / general use)" \
-      "2" "Switch to AI mode       (11 GB VRAM / ~3 GB system RAM)" \
+      "1" "NORMAL mode (default) - full RAM, Minecraft / VMs" \
+      "2" "AI mode - 11 GB VRAM / ~3 GB system RAM" \
       "3" "Details / refresh" \
       "4" "Exit to normal bash shell (type ps5-menu to return)" \
       3>&1 1>&2 2>&3) || exit 0
     return 0
   fi
   printf '\n=== PS5 Proxmox Mode Switcher ===\n%s\n\n' "$text"
-  printf '  1) Switch to DEFAULT mode  (Minecraft / VMs / general use)\n'
-  printf '  2) Switch to AI mode       (11 GB VRAM / ~3 GB system RAM)\n'
+  printf '  1) NORMAL mode (default) - full RAM, Minecraft / VMs\n'
+  printf '  2) AI mode - 11 GB VRAM / ~3 GB system RAM\n'
   printf '  3) Details / refresh\n'
   printf '  4) Exit to normal bash shell (type ps5-menu to return)\n\n'
   printf 'Choose [1-4]: '
@@ -163,7 +163,7 @@ while :; do
   fi
   pick "$(status_text)"
   case "$CHOICE" in
-    1) switch_mode default "DEFAULT mode (full RAM, stock GPU limit)" ;;
+    1) switch_mode default "NORMAL mode (default: full RAM, Minecraft / VMs)" ;;
     2) switch_mode ai "AI mode (11 GB VRAM / ~3 GB system RAM)" ;;
     3)
       out=$(ssh_host details 2>&1)
